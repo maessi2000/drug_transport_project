@@ -1,0 +1,121 @@
+# =====================================================================
+# config.yaml — Tutte le assunzioni del modello.
+# Unità interne: µm, s (D in µm²/s, Papp in cm/s solo per riferimento).
+#
+# Classificazione dei parametri (obbligatoria per ogni valore):
+#   measured   : misurato sperimentalmente, con fonte diretta
+#   calculated : derivato da relazione fisica esplicita (es. Stokes-Einstein)
+#   estimated  : ottenuto da fitting, calibrazione o range di letteratura
+#   assumed    : introdotto come parametro di modello, nessun dato disponibile
+#
+# Ogni valore DEVE avere: value, low, high, kind, source.
+# low/high = intervallo plausibile usato da incertezza e sensitività.
+# =====================================================================
+
+seed: 42
+workers: null              # processi paralleli per Langevin e sweep (null = tutti i core, 1 = seriale)
+t_max_s: 10.0              # tempo massimo di simulazione (censura a destra)
+n_traj: 3000               # numero di traiettorie per simulazione
+target_se: 0.015           # precisione MC desiderata su P_hit (se non null ha priorità su n_traj)
+max_censoring: 0.5         # avviso se la frazione censurata supera questa soglia
+
+integration:                    # parametri numerici (NON fisici), non entrano nell'incertezza
+  interface_width_um: 0.1       # larghezza di raccordo tanh delle interfacce; compartimenti >= ~3x questo valore
+  step_min_um: 0.005            # passo spaziale di Eulero vicino alle interfacce
+  step_max_um: 0.5              # passo spaziale massimo lontano dalle interfacce
+  step_distance_factor: 0.25    # passo = fattore x distanza dall'interfaccia più vicina, tra min e max
+  fp_cells_per_width: 4         # celle Fokker–Planck per interface_width_um
+
+# ---------------------------------------------------------------------
+# AMBIENTE BIOLOGICO
+# Sangue (x=0, riflettente) -> ... -> bersaglio (fine ultimo compartimento, assorbente)
+# D_eff = D_bulk * D_factor. 'partition' = compartimento in cui agisce logP
+# (nel modello logP = log10 del coefficiente di partizione efficace a pH 7.4, cioè logD7.4 per gli ionizzabili).
+# D_bulk in data/molecules.csv è riferito all'acqua a 37 °C: temperature_K e viscosity_Pa_s
+# non agiscono quando D_bulk è fornito (servono solo a Stokes-Einstein da radius_nm).
+# ---------------------------------------------------------------------
+environment:
+  temperature_K:   {value: 310.15, low: 308.15, high: 312.15, kind: measured,
+                    source: "Condizione fisiologica standard (37 °C)"}
+  viscosity_Pa_s:  {value: 6.9e-4, low: 6.0e-4, high: 1.0e-3, kind: measured,
+                    source: "Viscosità acqua a 37 °C ≈ 0.69 mPa·s (Kestin et al., J. Phys. Chem. Ref. Data 1978; valore non riverificato)"}
+  partition_slope: {value: 1.0, low: 0.5, high: 1.0, kind: assumed,
+                    source: "Pendenza log K(membrana) vs log K(ottanolo): valore NON verificato. Leo, Hansch & Elkins 1971 è la rassegna dei logP ottanolo/acqua, non la fonte della pendenza"}
+
+  compartments:
+    - name: blood
+      width:      {value: 1.0, low: 0.5, high: 2.0, kind: assumed,
+                   source: "Scelta di dominio: strato ematico adiacente alla parete (il diametro capillare reale è ~5-8 µm)"}
+      D_factor:   {value: 1.0, low: 1.0, high: 1.0, kind: assumed,
+                   source: "Per definizione: D_bulk è il D in soluzione acquosa (molecules.csv)"}
+    - name: endothelium
+      width:      {value: 0.5, low: 0.3, high: 1.0, kind: assumed,
+                   source: "Spessore endoteliale tipico ~0.1-1 µm (non riverificato); minimo 0.3 imposto dal raccordo numerico (3x interface_width_um)"}
+      D_factor:   {value: 3.0e-4, low: 1.0e-4, high: 3.0e-3, kind: calculated,
+                   source: "D_factor = P*h/D con P(fluoresceina sodica, r=0.45 nm) = 34.4e-6 cm/s in capillari mesenterici di rana (Fu, Adamson, Curry, Am J Physiol 1998), h=0.5 µm, D≈5.5e-6 cm²/s (Stokes-Einstein, 25 °C). Un solo letto vascolare: intervallo ampio, non verificato su altri distretti"}
+    - name: ecm
+      width:      {value: 3.0, low: 1.0, high: 5.0, kind: assumed,
+                   source: "Scelta di dominio: tratto interstiziale ridotto per contenere il costo di calcolo"}
+      D_factor:   {value: 0.4, low: 0.2, high: 0.75, kind: estimated,
+                   source: "D_tessuto/D_libero: saccarosio nel miocardio a 37 °C = 0.23 (Suenson 1974, Am J Physiol 227:1116); doxorubicina in gel biomimetico 373/501 = 0.74 e 256/501 = 0.51 in terreno (doi:10.1007/s13346-023-01445-1); valore = media geometrica 0.23-0.74"}
+    - name: membrane
+      width:      {value: 0.5, low: 0.3, high: 0.8, kind: assumed,
+                   source: "Spessore efficace coarse-grained: la bilayer reale è ~4-5 nm (Nagle & Tristram-Nagle, BBA 2000), non risolvibile con interface_width_um = 0.1; il D_factor sotto è calibrato per questo spessore"}
+      D_factor:   {value: 3.0e-4, low: 1.0e-4, high: 1.0e-3, kind: calculated,
+                   source: "D_factor = Papp*h/(K*D) con Papp Caco-2 pH 7.4 (SI MedChemComm 2014, doi:10.1039/c4md00470a, vedi papp_validation.csv): caffeina 4.45e-5 cm/s -> >= 2.9e-4 (Papp limitata dallo strato non agitato), atenololo 2.8e-7 cm/s con logD -1.9 -> <= 1.9e-4 (via transcellulare <= Papp); due membrane in serie nel monostrato -> x2 al massimo. Calibrazione approssimativa su 2 composti"}
+      partition:  true
+    - name: cytoplasm
+      width:      {value: 3.0, low: 1.0, high: 5.0, kind: assumed,
+                   source: "Scelta di dominio: tratto citoplasmatico ridotto per il costo di calcolo (raggio cellulare reale ~10 µm, es. HepG2 9.9 ± 0.7 µm in doi:10.1007/s13346-023-01445-1)"}
+      D_factor:   {value: 0.3, low: 0.25, high: 0.7, kind: measured,
+                   source: "D_cito/D_acqua: 0.26-0.27 per destrani/Ficoll in MDCK e fibroblasti (Seksek, Biwersi, Verkman, J Cell Biol 1997;138:131); BCECF ~0.25 (Kao, Abney, Verkman, J Cell Biol 1993;120:175); piccoli soluti nelle regioni non ostacolate fino a ~0.6-0.7 (bioRxiv 2023, doi:10.1101/2023.01.26.525579)"}
+
+# ---------------------------------------------------------------------
+# MOLECOLA DI RIFERIMENTO (esperimenti A, B, D, G)
+# L'esperimento C usa invece data/molecules.csv con molecole reali.
+# Gli intervalli coprono il 90% del set di molecules.csv.
+# ---------------------------------------------------------------------
+reference:
+  D_bulk_um2_s: {value: 700.0, low: 400.0, high: 1500.0, kind: estimated,
+                 source: "Mediana e intervallo dei D_bulk a 37 °C in molecules.csv (estremi esclusi)"}
+  logP:         {value: 1.0,   low: -3.5, high: 3.5,   kind: estimated,
+                 source: "Intervallo di logD7.4 coperto da molecules.csv (estremi esclusi)"}
+
+sweeps: {n: 15}            # punti per asse nelle mappe dell'esperimento D
+uncertainty: {n_samples: 500}
+
+# ---------------------------------------------------------------------
+# ESTENSIONI OPZIONALI (esperimenti E–H)
+# Un gruppo è attivo solo se richiesto: baseline(cfg, on=("force", "binding", ...))
+# ---------------------------------------------------------------------
+extensions:
+  force:
+    force_per_um: {value: 0.5, low: 0.05, high: 8.0, kind: assumed,
+                   source: "Forza esterna uniforme in kT/µm; Pe = f·L. Scenario, non dato sperimentale."}
+
+  binding:                 # F ⇌ B, stato legato immobile
+    k_unbind:         {value: 1.0,  low: 0.1,   high: 10.0,  kind: assumed,
+                       source: "Tasso di distacco; range tipico per interazioni deboli"}
+    cytoplasm.k_bind: {value: 2.0,  low: 0.01,  high: 100.0, kind: assumed,
+                       source: "Tasso di binding citoplasmatico; scenario"}
+
+  sinks:                   # tassi del primo ordine (1/s)
+    blood.k_clear:    {value: 0.1, low: 0.0, high: 1.0, kind: assumed,
+                       source: "Clearance ematica; ordine di grandezza da PK"}
+    ecm.k_offtarget:  {value: 0.5, low: 0.0, high: 5.0, kind: assumed,
+                       source: "Captazione off-target in ECM; scenario"}
+
+  anisotropy:
+    anisotropy:       {value: 0.8,  low: 0.0,  high: 0.95, kind: assumed,
+                       source: "(D∥ - D⊥)/(D∥ + D⊥); 0 = isotropo, 1 = completamente anisotropo"}
+    D_R_per_s:        {value: 10.0, low: 0.1,  high: 1000.0, kind: assumed,
+                       source: "Diffusione rotazionale; per molecole piccole in acqua ~10⁹ s⁻¹"}
+
+  pores:
+    porosity:         {value: 0.2, low: 0.0, high: 1.0, kind: assumed,
+                       source: "Frazione di apertura = porosity * period; scenario geometrico"}
+    pore_period_um:   {value: 4.0, low: 2.0, high: 8.0, kind: assumed,
+                       source: "Periodo spaziale dei pori nella barriera; scenario geometrico"}
+
+geometry_2d: {pore_compartment: endothelium}    # compartimento forato (periodico in y)
+pareto: {n_candidates: 200}                     # candidati campionati dagli intervalli dei descrittori (esperimento G)
